@@ -1,0 +1,801 @@
+rm(list = ls())  ## 魔幻操作，一键清空~
+options(stringsAsFactors = F)
+
+#===============================================================================
+#表达矩阵TPM log2(TPM + 1)
+#===============================================================================
+library(data.table)
+load("./data/STAD_download_from_UCSCXenastep1-output_TPM.Rdata")
+
+library(tidyverse)
+
+group_list <- Group
+table(group_list)
+dat <- eset_stad
+dat <- log2(dat+1)
+
+dat <- as.data.frame(t(dat))
+dat$group <- group_list
+table(dat$group)
+dat_sub <- subset(dat,group == "tumor")
+
+#Hub Related Gene
+#===============================================================================
+a <- fread("./data/Related DEGs.csv",data.table = F)
+
+dat_sub <- dat_sub[,colnames(dat_sub)%in%a$deg]
+# lasso_genes
+# dat_sub <- dat_sub[,colnames(dat_sub)%in%lasso_genes]
+
+#Match Clinical data
+#===============================================================================
+identical(cli_tr$sampleID,rownames(dat_sub))
+
+
+
+id <- rownames(dat_sub)
+ids <- id[id%in%cli_tr$sampleID]
+
+sur_tr_sub <- sur_tr[,c(1,3,4)]
+dat_sub$ID <- rownames(dat_sub)
+
+dat_sub_sur <- merge(dat_sub,sur_tr_sub,by.x = "ID",by.y = "sample")
+dat_sub_sur <- na.omit(dat_sub_sur)
+any(is.na(dat_sub_sur))
+
+aa <- dat_sub_sur
+str(aa$OS)
+aa$OS <- as.factor(as.character(aa$OS))
+
+#===============================================================================
+
+
+
+
+# 必要包
+library(survival)
+library(survminer)
+library(glmnet)
+#===============================================================================
+
+
+
+set.seed(123)
+
+
+#第二步：lasso-cox
+#===============================================================================
+#LASSO-Cox 
+#===============================================================================
+
+valid_idx <- aa$OS.time > 0
+
+aa_removed <- aa[aa$OS.time <= 0, ]
+View(aa_removed)  
+
+time = aa$OS.time[valid_idx]
+status = aa$OS[valid_idx]
+
+expr <- aa[valid_idx,2:(ncol(aa)-2)]
+
+x <- as.matrix(expr)
+y <- Surv(time, status == "1")
+attr(y, "type")
+
+# x <- as.matrix(expr)
+# y <- Surv(aa$OS.time, aa$OS=="1")
+
+#2.
+fit<- glmnet(x, y,family="cox",alpha=1)
+
+# LASSO-Cox
+cv.fit <- cv.glmnet(x, y, family="cox", alpha=1, nfolds=10)
+
+lambda.min <- cv.fit$lambda.min
+
+coef_lasso <- coef(cv.fit, s=lambda.min)
+selected_genes <- rownames(coef_lasso)[which(coef_lasso != 0)]
+selected_genes
+
+
+jpeg("./pic/lasso_fit.jpeg",width = 6, height = 6, units = "in", res = 300)
+plot(fit, xvar = "lambda", label = TRUE,
+     main = "LASSO Coefficient Paths",
+     xlab = "Log Lambda",
+     ylab = "Coefficients",
+     col = rainbow(ncol(fit$beta)))  
+
+plot(fit, xvar="lambda", label=T)
+dev.off()
+
+
+#4.
+set.seed(123)
+cv.fit <- cv.glmnet(x, y,
+                    family="cox",
+                    alpha = 1, 
+                    nfolds = 10)
+
+jpeg("./pic/lasso_fit.cv_10.jpeg",width = 6, height = 6, units = "in", res = 300)
+
+plot(cv.fit)
+
+dev.off()
+
+
+#5.
+
+best_lambda <- cv.fit$lambda.min
+cat("lambda:", best_lambda, "\n")
+
+
+ridge.coef1 <- predict(fit, s=cv.fit$lambda.1se, type = "coefficients");
+ridge.coef1
+
+ridge.coef2 <- predict(fit, s=cv.fit$lambda.min, type = "coefficients");
+ridge.coef2
+
+
+coef_df <- as.data.frame(as.matrix(ridge.coef2))
+coef_df <- coef_df[coef_df[, 1] != 0, , drop = FALSE]
+coef_df
+
+
+#6. 
+lasso_coef <- coef(cv.fit, s = "lambda.min")
+lasso_genes <- rownames(lasso_coef)[as.numeric(lasso_coef) != 0]
+cat("LASSO:", length(lasso_genes), "\n")
+print(lasso_genes)
+
+
+
+
+
+
+
+
+
+
+
+x <- as.matrix(expr)
+y <- Surv(time, status == "1")
+
+library(glmnet)
+
+set.seed(123)
+B <- 1000
+gene_names <- colnames(x)
+select_mat <- matrix(0, nrow = B, ncol = ncol(x))
+colnames(select_mat) <- gene_names
+
+for (b in 1:B) {
+  idx <- sample(seq_len(nrow(x)), replace = TRUE)
+  
+  x_b <- x[idx, ]
+  y_b <- y[idx]
+  
+  cv.fit <- cv.glmnet(
+    x_b, y_b,
+    family = "cox",
+    alpha = 1,
+    nfolds = 10
+  )
+  
+  coef_b <- coef(cv.fit, s = "lambda.min")
+  select_mat[b, ] <- as.numeric(coef_b != 0)
+}
+
+selection_frequency <- colMeans(select_mat)
+
+selection_frequency <- data.frame(selection_frequency)
+
+
+
+
+#===============================================================================
+
+
+
+#===============================================================================
+#
+#===============================================================================
+# 
+df <- data.frame(row.names = rownames(expr),
+                 time=time, status=status, expr[, selected_genes, drop=FALSE])
+df$time <- as.numeric(df$time)
+
+# 而 Surv(time, status) 中：
+# 
+# status=0/1 
+# 
+# status=1/2 
+#df$status <- as.numeric(df$status)
+
+if(is.factor(df$status)) df$status <- as.numeric(as.character(df$status))
+
+#3
+#df <- df[,-3]
+
+formula <- as.formula(paste("Surv(time, status) ~", paste(selected_genes, collapse="+")))
+coxfit <- coxph(formula, data=df)
+
+# 
+
+df$riskscore <- predict(coxfit, type="lp")
+
+save(df,file = "./data/riskscore.Rdata")
+
+cox.zph(coxfit)
+
+#===============================================================================
+
+#用 risk_plot 可视化
+#===============================================================================
+# 绘制风险曲线 + 生存状态 + 热图
+expr <- aa[valid_idx,1:(ncol(aa)-2)]
+rownames(expr) <- expr$ID
+
+
+meta = data.frame(sample = expr$ID,
+                  event = status,
+                  X_PATIENT = expr$ID,
+                  time = time)
+
+
+
+
+jpeg("./pic/risk_plot_cox.jpeg",width = 6, height = 6, units = "in", res = 300)
+
+
+# 
+risk_plot(
+  exprSet_hub = t(expr[, selected_genes, drop=FALSE]),
+  meta = meta,
+  riskscore = riskscore,
+)
+
+dev.off()
+
+
+
+
+
+
+#
+#===============================================================================
+#
+#===============================================================================
+
+df$group <- ifelse(df$riskscore>median(df$riskscore),"High","Low")
+df$time <- (df$time/365)*12
+
+fit <- survfit(Surv(time, status) ~ group,data = df)
+df <- subset(df,time<=65)
+
+jpeg("./pic/riskscore.jpeg",width = 6, height = 6, units = "in", res = 300)
+
+# 绘制 KM 曲线
+ggsurvplot(fit, 
+           data=df,
+           risk.table=TRUE, 
+           pval=TRUE)
+
+dev.off()
+
+
+
+library(rms)
+dat_rcs <- df[,c(3,4,13)]
+
+dd <- datadist(dat_rcs)
+options(datadist='dd')
+
+fit <- cph(
+  Surv(time, status) ~ rcs(riskscore,4),
+  data = dat_rcs,
+  x=TRUE,
+  y=TRUE,
+  surv = T
+)
+
+plot(Predict(fit, riskscore, fun=exp))
+
+
+
+anova(fit)
+
+
+hist(dat_rcs$riskscore)
+
+density(dat_rcs$riskscore)
+
+plot(
+  Predict(fit, riskscore, fun = base::exp),
+  xlab = "riskscore",
+  ylab = "Hazard Ratio"
+)
+
+library(ggplot2)
+
+p <- ggplot(Predict(fit, riskscore, fun= base::exp))
+
+plot(p)
+
+plot(
+  Predict(fit, riskscore, fun = base::exp),
+  conf.int = TRUE
+)
+
+jpeg(filename = "./pic/riskscore_HR_RCS.jpeg",width = 10,height = 10,units = "cm",res = 300)
+
+plot(
+  Predict(fit, riskscore, fun = base::exp),
+  xlab = "riskscore",
+  ylab = "Hazard Ratio"
+)
+
+
+dev.off()
+
+
+#===============================================================================
+
+
+#===============================================================================
+
+
+#第五步：多因素回归
+#===============================================================================
+#riskscore在内的多因素回归
+#===============================================================================
+#Cox
+#整合临床信息
+id <- expr$ID
+sur_muti_cox <- cli_tr[cli_tr$sampleID%in%id,]
+sur_muti_cox <- sur_muti_cox[,c(1,2,12,34,48,57,58,59)]
+race <- fread("./data/race.tsv")
+race$sample <- str_sub(race$sample,1,15)
+race <- race[race$sample%in%id,]
+race <- race[,c(1,4,5,7,14)]
+
+sur_muti_cox_combin <- merge(sur_muti_cox,race,by.x = "sampleID",by.y = "sample")
+sur_muti_cox_combin <- sur_muti_cox_combin[,c(1,3:8,ncol(sur_muti_cox_combin))]
+id_name <- c("ID","Age","Gender","Grade","M","N","T","Race")
+names(sur_muti_cox_combin) <- id_name
+sur_muti_cox_combin <- sur_muti_cox_combin[,c(1:3,8,4:7)]
+
+aa_lasso_risk <- aa_lasso[,c(1:ncol(aa_lasso))]
+aa_lasso_risk$ID <- rownames(aa_lasso_risk)
+
+muti_cox_combin <- merge(sur_muti_cox_combin,aa_lasso_risk,by = "ID")
+muti_cox_combin <- muti_cox_combin[-6,]
+
+#mutiCOX
+# 加载必要的包
+library(survival)
+
+muti_cox_combin$Age <- ifelse(muti_cox_combin$Age<60,"<60","≥60")
+
+muti_cox_combin$status <- as.numeric(as.character(muti_cox_combin$status))
+muti_cox_combin$time <- as.numeric(muti_cox_combin$time)
+
+# 合并 T 分组（如 T1a, T1b -> T1，T2a, T2b -> T2）
+muti_cox_combin$T_new <- gsub("a|b", "", muti_cox_combin$T)
+table(muti_cox_combin$T, muti_cox_combin$T_new)
+
+# 合并 N 分组（如 N3a, N3b -> N3）
+muti_cox_combin$N_new <- gsub("a|b", "", muti_cox_combin$N)
+table(muti_cox_combin$N, muti_cox_combin$N_new)
+
+# 保留常见的 M0、M1，剔除 MX 或合并为未知
+muti_cox_combin$M_new <- ifelse(muti_cox_combin$M == "MX", NA, as.character(muti_cox_combin$M))
+
+muti_cox_combin$M <- muti_cox_combin$M_new
+muti_cox_combin$T <- muti_cox_combin$T_new
+muti_cox_combin$N <- muti_cox_combin$N_new
+
+muti_cox_combin$Race <- ifelse(muti_cox_combin$Race=="native hawaiian or other pacific islander","not reported",muti_cox_combin$Race)
+
+#===============================================================================
+# 构建 Cox 多因素回归模型
+#===============================================================================
+# 用反引号包裹 T 和 M，防止解析错误
+cox_model_cox <- coxph(Surv(time, status) ~ Age + Gender + Race + Grade + `M` + N + `T` + riskscore, 
+                       data = muti_cox_combin)
+
+
+cox_model_2 <- coxph(Surv(time, status) ~ Age + Gender + Race + Grade + M_new + N_new + T_new + PDGFRB + 
+                       MAPK10 + CAV1 + TIMP1 + riskscore, 
+                     data = muti_cox_combin)
+
+
+
+cox_model_lasso <- coxph(Surv(time, status) ~ Age + Gender + Race + Grade + `M` + N + `T`  + 
+                           risk_score_lasso, 
+                         data = muti_cox_combin)
+
+
+# 查看回归结果
+summary(cox_model)
+summary(cox_model_cox)
+cox.zph(cox_model_cox)
+summary(cox_model_cox)$concordance
+# C      se(C) 
+# 0.67981299 0.02273052 
+library(timeROC)
+risk_score <- predict(
+  cox_model_cox,
+  type = "lp"
+)
+
+sum(complete.cases(
+  muti_cox_combin[,c(
+    "time","status",
+    "Age","Gender","Race",
+    "Grade","M","N","T",
+    "riskscore"
+  )]
+))
+
+df1 <- df
+df1$time <- (df1$time/365)*12
+roc <- timeROC(
+  T = df1$time,
+  delta = df1$status,
+  marker = risk_score,
+  cause = 1,
+  weighting = "marginal",
+  times = c(12,36,60),
+  iid = TRUE
+)
+
+fit_data <- muti_cox_combin[
+  complete.cases(
+    muti_cox_combin[, c(
+      "time","status",
+      "Age","Gender","Race",
+      "Grade","M","N","T",
+      "riskscore"
+    )]
+  ),
+]
+
+risk_score <- predict(
+  cox_model_cox,
+  newdata = fit_data,
+  type = "lp"
+)
+
+
+
+roc <- timeROC(
+  T = fit_data$time,
+  delta = fit_data$status,
+  marker = risk_score,
+  cause = 1,
+  weighting = "marginal",
+  times = c(365,1095,1825),   # 如果单位是天
+  iid = TRUE
+)
+
+summary(fit_data$time)
+jpeg("./ROC/lx-model-1-3-5-ROC.jpeg",width = 16,height = 16,units = "cm",res = 300)
+
+
+plot(
+  roc,
+  time = roc$times[1],
+  col = 2,
+  lwd = 2
+)
+
+plot(
+  roc,
+  time = roc$times[2],
+  add = TRUE,
+  col = 4,
+  lwd = 2
+)
+
+
+plot(
+  roc,
+  time = roc$times[3],
+  add = TRUE,
+  col = 3,
+  lwd = 2
+)
+
+legend(
+  "bottomright",
+  legend = paste0(
+    c("1-year","3-year","5-year"),
+    " AUC=",
+    round(roc$AUC,3)
+  ),
+  col = c(2,4,3),
+  lwd = 2
+)
+
+dev.off()
+
+roc$AUC
+# t=365    t=1095    t=1825 
+# 0.7016231 0.7049740 0.7614560 
+
+
+cox_model_cox_new <- coxph(
+  Surv(time, status) ~
+    Age + Gender + Race +
+    Grade + `M` + `N` + `T` +
+    riskscore,
+  data = fit_data
+)
+
+summary(cox_model_cox_new)$concordance
+
+
+
+
+# 4. Nomogram
+# 
+# 建立rms模型：
+
+library(rms)
+
+dd <- datadist(fit_data)
+options(datadist="dd")
+
+cox_rms <- cph(
+  Surv(time,status)~
+    Age+Gender+Race+
+    Grade+`M`+`N`+`T`+
+    riskscore,
+  data=fit_data,
+  x=TRUE,
+  y=TRUE,
+  surv=TRUE
+)
+
+surv <- Survival(cox_rms)
+
+nom <- nomogram(
+  cox_rms,
+  fun=list(
+    function(x) surv(365,x),
+    function(x) surv(1095,x),
+    function(x) surv(1825,x)
+  ),
+  funlabel=c(
+    "1-Year Survival",
+    "3-Year Survival",
+    "5-Year Survival"
+  )
+)
+
+plot(nom)
+
+
+head(
+  surv(
+    1095,
+    predict(cox_rms)
+  )
+)
+
+
+# Bootstrap内部验证
+# 
+# 您下一步可以直接跑：
+
+set.seed(123)
+
+val <- validate(
+  cox_rms,
+  method = "boot",
+  B = 1000
+)
+
+val
+
+# 然后提取校正后的 C-index：
+
+corrected_cindex <-
+  (val["Dxy","index.corrected"] + 1)/2
+
+corrected_cindex
+
+
+summary(cox_model_2)
+
+# > cox.zph(cox_model_cox)
+
+# > summary(cox_model_cox)$concordance
+
+
+#===============================================================================
+
+#cox
+cox_model = cox_model_cox
+
+#lasso
+cox_model = cox_model_lasso
+
+#===============================================================================
+
+
+summary(cox_model)$coefficients
+
+# 拿出模型 summary
+cox_summary <- summary(cox_model)
+
+# 提取相关信息
+HR <- round(cox_summary$coefficients[, "exp(coef)"], 3)
+CI5 <- round(cox_summary$conf.int[, "lower .95"], 3)
+CI95 <- round(cox_summary$conf.int[, "upper .95"], 3)
+CI <- paste0(CI5, " - ", CI95)
+p <- signif(cox_summary$coefficients[, "Pr(>|z|)"], 3)
+Characteristics <- rownames(cox_summary$coefficients)
+
+# 构建结果表
+cox_result_df <- data.frame(
+  Characteristics = Characteristics,
+  HR = HR,
+  CI5 = CI5,
+  CI95 = CI95,
+  CI = CI,
+  p = p,
+  row.names = NULL
+)
+
+# 查看结果
+print(cox_result_df)
+muticox <- cox_result_df
+
+cox_result_df[c(19:25),] <- paste(rep(" ",ncol(cox_result_df)),collapse = " ")
+#cox_result_df[c(19:25),] <- NA
+
+cox_result_df[19,1] <- "Age"
+
+cox_result_df[20,1] <- "Gender"
+cox_result_df[21,1] <- "Race"
+cox_result_df[22,1] <- "Grade"
+cox_result_df[23,1] <- "M"
+cox_result_df[24,1] <- "N"
+cox_result_df[25,1] <- "T"
+
+cox_result_df <- cox_result_df[c(19,1,20,2,21,3:5,22,6:8,23,9,24,10:13,25,14:17,18),]
+
+cox_result_df$HR   <- as.numeric(cox_result_df$HR)
+cox_result_df$CI5  <- as.numeric(cox_result_df$CI5)
+cox_result_df$CI95 <- as.numeric(cox_result_df$CI95)
+
+dat <- cox_result_df
+dat$" " <- paste(rep(" ",20),collapse = " ")
+dat$"HR(95%CI)" <- dat$CI
+dat <- dat[,c(1,2,5,6,7,8)]
+
+
+names(dat) <- c("Variable", "HR", "CI","p.value", " ","HR(95%CI)")
+
+
+
+exp1 <- dat[,c("Variable", "p.value", "HR(95%CI)"," ")]
+write_excel_csv(exp1,file = "./data/exp1-cox-fr.csv")
+
+
+#自定义森林图的主题元素
+tm <- forest_theme(base_size = 10,
+                   refline_col = "red",
+                   footnote_col = "#636363",
+                   footnote_fontface = "italic")
+
+#===============================================================================
+
+pdf("./pic/muti_Cox_riskscore_forest.pdf", width = 16, height = 26)
+
+
+#===============================================================================
+
+
+#subtype
+library(TCGAbiolinks)
+
+subtypes <- TCGAquery_subtype(tumor = "STAD")
+
+head(subtypes)
+
+table(subtypes$Molecular.Subtype)
+table(subtypes$Lauren.Class)
+table(subtypes$Molecular.Subtype,useNA="ifany")
+subtypes <- subtypes[
+  !is.na(subtypes$Molecular.Subtype),
+]
+
+
+expr_sub <- aa_lasso_risk
+
+subtypes$patient <- substr(subtypes$patient,1,12)
+
+expr_patient <- substr(expr_sub$ID,1,12)
+
+meta <- data.frame(
+  patient = expr_patient,
+  sample = (expr_sub$ID)
+)
+
+meta <- merge(
+  meta,
+  subtypes[,c("patient","Molecular.Subtype")],
+  by="patient"
+)
+
+names(meta)[2] = "ID"
+
+expr_sub <- merge(
+  expr_sub,
+  meta,
+  by = "ID"
+)
+
+
+library(ggpubr)
+jpeg("./stage_boxplot/Molecular.Subtype.jpeg",width = 16,height = 10,units = "cm",res = 300)
+
+ggboxplot(
+  expr_sub,
+  x="Molecular.Subtype",
+  y="PDGFRB",
+  color="Molecular.Subtype",fill = "Molecular.Subtype"
+) +
+  stat_compare_means()+
+  geom_boxplot(outlier.shape = NA, alpha = 0.8) +
+  geom_jitter(width = 0.2, size = 1.5, alpha = 0.6) +
+  scale_fill_brewer(palette = "Set2") 
++
+  theme_classic(base_size = 14) 
++
+  theme(
+    legend.position = "none",
+    plot.title = element_text(hjust = 0.5)
+  )
+
+dev.off()
+
+kruskal.test(
+  PDGFRB ~ Molecular.Subtype,
+  data=expr_sub
+)
+
+coxph(
+  Surv(time,status)~
+    PDGFRB+
+    Molecular.Subtype,data = expr_sub
+)
+
+shapiro.test(expr_sub$PDGFRB)
+
+library(FSA)
+
+dunnTest(
+  PDGFRB ~ Molecular.Subtype,data = expr_sub,
+  method = "bh"
+)
+
+library(dplyr)
+
+expr_sub %>%
+  group_by(Molecular.Subtype) %>%
+  summarise(
+    n=n(),
+    median=median(PDGFRB),
+    mean=mean(PDGFRB)
+  ) %>%
+  arrange(desc(median))
+
+
+cin <- expr_sub[expr_sub$Molecular.Subtype=="CIN",]
+msi <- expr[,meta$Molecular.Subtype=="MSI"]
+gs  <- expr[,meta$Molecular.Subtype=="GS"]
+ebv <- expr[,meta$Molecular.Subtype=="EBV"]
+
