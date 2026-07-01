@@ -1,0 +1,47 @@
+rm(list = ls())  
+options(stringsAsFactors = F)
+
+#venn
+#===============================================================================
+library(data.table)
+
+durg <- fread("data/GeneCards-SearchResults-drug.csv")
+
+all_degs <- fread("./data/all_degs.csv")
+all_degs <- all_degs[-1,]
+
+all_degs_DOWN <- fread("./data/all_degs_DOWN.csv")
+all_degs_DOWN <- all_degs_DOWN[-1,]
+
+all_degs_UP <- fread("./data/all_degs_UP.csv")
+all_degs_UP <- all_degs_UP[-1,]
+
+
+
+#deg_diff <- deg[deg$group != "stable",]
+
+
+venn <- durg[durg$`Gene Symbol`%in%all_degs$V2,]
+
+venn_DOWN <- durg[durg$`Gene Symbol`%in%all_degs_DOWN$V2,]
+venn_DOWN$sta <- "DOWN"
+
+venn_UP <- durg[durg$`Gene Symbol`%in%all_degs_UP$V2,]
+venn_UP$sta <- "UP"
+
+venn_all <- rbind(venn_DOWN,venn_UP)
+write.csv(venn_all,file = "./data/venn_all_durg_vs_3DEGs")
+
+
+
+all_degs_inall <- list(DEGs = all_degs$V2, DRUG = durg$`Gene Symbol`)
+
+library(VennDiagram)
+library(venn)
+library(tinyarray)
+
+all_degs_venn <- draw_venn(all_degs_inall, "ALL DEGs in DRUG",scaled=FALSE) 
+all_degs_venn
+
+library(ggplot2)
+ggsave(filename = "./pic/DEGs.jpe_newg", plot = all_degs_venn, dpi = 300, width = 5, height = 5) 
