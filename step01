@@ -1,1 +1,307 @@
+rm(list = ls())  ## 
+options(stringsAsFactors = F)
 
+#CP936
+
+#Counts
+#===============================================================================
+load("./data/STAD_download_from_UCSCXenastep1-output_Counts.Rdata")
+eset_stad <- eset_stad_count #
+
+#
+library(tidyverse)
+# group_list <- ifelse(as.numeric(substr(colnames(eset_stad),14,15))<10,"Tumor","Normal")
+# group_list <- factor(group_list,levels = c("Normal","Tumor"))
+group_list <- Group
+table(group_list)
+dat <- eset_stad
+
+boxplot(dat[1:100,1:100],las=2)
+
+
+f <- "STAD"
+
+
+#===============================================================================
+if(T){
+  #
+  #===============================================================================
+  library(DESeq2)
+  a <- dat
+  colData <- data.frame(row.names =colnames(a),
+                        condition=group_list) #condition
+  
+  a <- apply(a, 2, as.integer)#DESeq2
+  rownames(a) <- rownames(dat)
+  
+  dds <- DESeqDataSetFromMatrix(countData = a,
+                                colData = colData,
+                                design = ~ condition)
+  
+  dds <- DESeq(dds)
+  
+  # 
+  resultsNames(dds)
+  
+  # 
+  # 
+  res <- results(dds, contrast = c("condition",rev(levels(group_list))))
+
+  
+  # 
+  resOrdered <- res[order(res$pvalue),] # 按照P值排序
+  DEG <- as.data.frame(resOrdered)
+  head(DEG)
+  
+  #
+  DEG <- na.omit(DEG)
+  
+  #在DEG里添加一列名为change列，标记基因上调下调:
+  logFC_cutoff <- 1
+  # logFC_cutoff <- with(DEG,mean(abs(log2FoldChange)) + 2*sd(abs(log2FoldChange)) )
+  # logFC_cutoff
+  
+  
+  DEG$change = as.factor(
+    ifelse(DEG$pvalue < 0.05 & abs(DEG$log2FoldChange) > logFC_cutoff,
+           ifelse(DEG$log2FoldChange > logFC_cutoff ,'UP','DOWN'),'NOT'))
+  
+  head(DEG)
+  
+  View(DEG)
+  DESeq2_DEG <- DEG
+  
+  table(DEG$change)
+  save(DESeq2_DEG,file = "./data/DESeq2_DEG.Rdata")
+  #===============================================================================
+  
+  
+  
+  #edgeR方法做差异分析
+  #===============================================================================
+  library(edgeR)
+  dge <- DGEList(counts=a,group=group_list)
+  dge$samples$lib.size <- colSums(dge$counts)
+  dge <- calcNormFactors(dge)
+  
+  design <- model.matrix(~0+group_list)
+  rownames(design)<-colnames(dge)
+  colnames(design)<-levels(group_list)
+  
+  dge <- estimateGLMCommonDisp(dge,design)
+  dge <- estimateGLMTrendedDisp(dge, design)
+  dge <- estimateGLMTagwiseDisp(dge, design)
+  
+  fit <- glmFit(dge, design)
+  fit2 <- glmLRT(fit, contrast=c(-1,1))
+  
+  DEG2=topTags(fit2, n=nrow(a))
+  DEG2=as.data.frame(DEG2)
+  
+  logFC_cutoff2 <- 1
+  #logFC_cutoff2 <- with(DEG2,mean(abs(logFC)) + 2*sd(abs(logFC)) )
+  
+  DEG2$change = as.factor(ifelse(DEG2$PValue < 0.05 & abs(DEG2$logFC) > logFC_cutoff2,
+                                 ifelse(DEG2$logFC > logFC_cutoff2 ,'UP','DOWN'),'NOT') )
+  
+  head(DEG2)
+  
+  
+  #
+  table(DEG2$change)
+  
+  edgeR_DEG <- DEG2
+  save(edgeR_DEG,file = "./data/edgeR_DEG.Rdata")
+  #===============================================================================
+  
+  
+  #normalize
+  #===============================================================================
+  library(limma)
+  dat=normalizeBetweenArrays(dat)
+  boxplot(dat[1:100,1:60],las=2)
+  
+  #limma-voom progressing
+  #===============================================================================
+  library(limma)
+  design <- model.matrix(~0+group_list)
+  colnames(design) <- levels(group_list)
+  rownames(design) <- colnames(a)
+  deg <- DGEList(counts=a,group = group_list) # 创建 DGEList 对象 
+  # 这里我们使用上面提到的 filterByExpr() 进行自动过滤，去除低表达基因
+  keep <- filterByExpr(deg)
+  deg <- deg[keep, , keep.lib.sizes = FALSE] 
+  
+  # 归一化，得到的归一化系数被用作文库大小的缩放系数 
+  deg <- calcNormFactors(deg) # TMM标准化
+  
+  logCPM <- cpm(deg,log = T,prior.count = 3)
+  
+  # 使用 voom 方法进行标准化 
+  # 如果是芯片数据、TPM数据或已标准化的数据，不需要再进行标准化，
+  # 可直接从这里开始进行差异分析 
+  # log2转换：建议对TPM数据进行log2(TPM + 1)转换，以压缩高表达基因的极端值，提升正态性。
+  # tpm_log <- log2(tpm_matrix + 1)
+  v <- voom(deg,design = design,normalize = "quantile")
+  
+  contrasts <- paste(rev(levels(group_list)),collapse = "-")
+  contrasts
+  contrast.matrix <- makeContrasts(contrasts = contrasts,
+                                   levels = design)
+  
+  
+  fit <- lmFit(v,design = design) # 使用线性模型进行拟合 
+  fit2 <- contrasts.fit(fit,contrasts = contrast.matrix)
+  fit2 <- eBayes(fit2)
+  
+  # 获取差异表达基因结果 
+  DEG3 <- topTable(fit = fit2,coef = contrasts,n = Inf)
+  DEG3 = na.omit(DEG3)
+  
+  logFC_cutoff3 <- 1
+  #logFC_cutoff3 <- with(DEG3,mean(abs(logFC)) + 2*sd(abs(logFC)) )
+  
+  DEG3$change = as.factor(ifelse(DEG3$P.Value < 0.05 & abs(DEG3$logFC) > logFC_cutoff3,
+                                 ifelse(DEG3$logFC > logFC_cutoff3 ,'UP','DOWN'),'NOT') )
+  
+  
+  head(DEG3)
+  
+  
+  #看一下用edgeR方法，上调和下调基因的数量：
+  table(DEG3$change)
+  
+  limma_voom_DEG <- DEG3
+  
+  save(DESeq2_DEG,edgeR_DEG,limma_voom_DEG,file = "./data/DESeq2_edgeR_limma_voom_DEG.Rdata")
+  #===============================================================================
+  #===============================================================================
+  
+  #===============================================================================
+  
+  logFC <- 1
+  P.Value = 0.05
+  # 火山图
+  p <- ggplot(data = limma_voom_DEG,
+              aes(x = logFC,
+                  y = -log10(P.Value))) +
+    geom_point(alpha = 0.4, size = 3.5,
+               aes(color = change)) +
+    ylab("-log10(Pvalue)")+
+    scale_color_manual(values = c("blue4", "grey", "red3"))+
+    geom_vline(xintercept = c(-logFC, logFC), lty = 4, col = "black", lwd = 0.8) +
+    geom_hline(yintercept = -log10(P.Value), lty = 4, col = "black", lwd = 0.8) +
+    theme_bw()
+  p
+  #===============================================================================
+  #===============================================================================
+
+  
+  
+  
+  #===============================================================================
+  # 火山图
+  library(EnhancedVolcano)
+  #library(airway)
+  #options(BioC_mirror = "http://mirrors.tuna.tsinghua.edu.cn/CRAN/")
+  v1 <- EnhancedVolcano(DESeq2_DEG,
+                        lab = rownames(DESeq2_DEG),
+                        x = "log2FoldChange",
+                        y = "pvalue",
+                        xlim = c(-8,8),
+                        title = "DESeq2-DEGs",
+                        pCutoff = 0.05,
+                        FCcutoff = 2,
+                        colAlpha = 1,
+                        legendPosition = "right",
+                        legendLabSize = 10,
+                        legendIconSize = 3.0)
+  
+  ggsave(plot = v1,
+         filename = "./PIC/volcano_Counts_DESeq2.jpeg",width = 8,height = 6,dpi = 600)
+  
+  
+  v2 <- EnhancedVolcano(edgeR_DEG,
+                        lab = rownames(edgeR_DEG),
+                        x = "logFC",
+                        y = "PValue",
+                        xlim = c(-8,8),
+                        title = "edgeR-DEGs",
+                        pCutoff = 0.05,
+                        FCcutoff = 2,
+                        colAlpha = 1,
+                        legendPosition = "right",
+                        legendLabSize = 10,
+                        legendIconSize = 3.0)
+  
+  ggsave(plot = v2,
+         filename = "./PIC/volcano_Counts_edgeR.jpeg",width = 8,height = 6,dpi = 600)
+  
+  
+  
+  v3 <- EnhancedVolcano(limma_voom_DEG,
+                        lab = rownames(limma_voom_DEG),
+                        x = "logFC",
+                        y = "P.Value",
+                        xlim = c(-8,8),
+                        title = "limma_voom-DEGs",
+                        pCutoff = 0.05,
+                        FCcutoff = 2,
+                        colAlpha = 1,
+                        legendPosition = "right",
+                        legendLabSize = 10,
+                        legendIconSize = 3.0)
+  
+  ggsave(plot = v3,
+         filename = "./PIC/volcano_Counts_limma_voom.jpeg",width = 8,height = 6,dpi = 600)
+  
+  
+  
+  #把三个火山图组合起来：
+  
+  multiplot <- function(..., plotlist = NULL, file, cols = 1, layout = NULL){
+    
+    require(grid)
+    #make a list from the ... arguments and plotlist
+    plots <- c(list(...), plotlist)
+    
+    numPlots = length(plots)
+    
+    #if layout is NULL, then use "cols" to determine layout
+    if(is.null(layout)){
+      # Make the panel
+      # ncol:Number of columns of plots
+      # nrow:Number of rows needed, calculated from # of cols
+      layout <- matrix(seq(1, cols*ceiling(numPlots/cols)),
+                       ncol = cols, nrow = ceiling(numPlots/cols))
+    }
+    
+    if(numPlots==1){
+      
+      print(plots[[1]])
+      
+    }else{
+      
+      # Set up the page
+      grid.newpage()
+      pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+      # Make each plot, in the correct location
+      for (i in 1:numPlots) {
+        # Get the i,j matrix positions of the regions that contain this subplot
+        matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+        
+        print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                        layout.pos.col = matchidx$col))
+        
+      }
+    }
+  }
+  
+  pdf("./PIC/volcano_Counts.pdf",width = 24,height = 6)
+  vm <- multiplot(v1,v2,v3,cols=3)
+  
+  dev.off()
+  
+  
+  #===============================================================================
+}
